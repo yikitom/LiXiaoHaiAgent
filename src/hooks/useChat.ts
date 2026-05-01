@@ -180,12 +180,15 @@ export function useChat(agentId: string) {
             seenEventIdsRef.current.add(ev.id);
 
             if (ev.type === "delta") {
-              // 关键：每个 agent.message 事件创建一个独立、不可变 bubble
+              // 每个 agent.message 事件创建一个独立、不可变 bubble；
+              // 大消息额外携带 fullContent，给气泡渲染"查看完整内容"
               appendMessage({
                 id: uid(),
                 eventId: ev.id,
                 role: "assistant",
                 content: ev.text,
+                fullContent: ev.fullText,
+                isLarge: ev.isLarge,
                 createdAt: nowIso(),
               });
               setStatus(null);

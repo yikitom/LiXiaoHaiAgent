@@ -105,6 +105,7 @@ export default function ChatPage() {
             content={m.content}
             agentName={agent.name}
             streaming={false}
+            fullContent={"fullContent" in m ? m.fullContent : undefined}
           />
         ))}
 

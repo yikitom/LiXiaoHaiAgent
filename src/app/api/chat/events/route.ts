@@ -58,8 +58,44 @@ function extractSessionError(event: Record<string, unknown>): {
 }
 
 type ClientEvent =
-  | { id: string; type: "delta"; text: string }
+  | {
+      id: string;
+      type: "delta";
+      text: string;
+      isLarge?: boolean;
+      fullText?: string;
+    }
   | { id: string; type: "status"; text: string };
+
+// 阈值：超过这个字符数的 agent.message 视为「大消息」，气泡里只显示
+// preview，原文通过点击"查看完整内容"在 modal 里展示。
+const LARGE_CONTENT_THRESHOLD = 800;
+const PREVIEW_MAX_CHARS = 320;
+
+function makePreview(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= PREVIEW_MAX_CHARS) return trimmed;
+
+  // 优先在第一个分段（双换行 / --- / *** 或主标题边界）切
+  const firstSection = trimmed.split(/\n\s*\n|\n---|\n\*\*\*/)[0];
+  if (firstSection.length >= 80 && firstSection.length <= PREVIEW_MAX_CHARS) {
+    return firstSection.trim() + "\n\n…";
+  }
+
+  // 否则按字符截断，尽量在句号 / 换行处收尾
+  const cut = trimmed.slice(0, PREVIEW_MAX_CHARS);
+  const breakIdx = Math.max(
+    cut.lastIndexOf("。"),
+    cut.lastIndexOf("！"),
+    cut.lastIndexOf("？"),
+    cut.lastIndexOf(". "),
+    cut.lastIndexOf("\n"),
+  );
+  if (breakIdx > PREVIEW_MAX_CHARS * 0.5) {
+    return trimmed.slice(0, breakIdx + 1) + "\n\n…";
+  }
+  return cut + "…";
+}
 
 function jsonError(status: number, message: string) {
   return Response.json({ error: message }, { status });
@@ -172,8 +208,19 @@ export async function POST(req: NextRequest) {
           texts.push(block.text);
         }
       }
-      if (texts.length > 0 && eId) {
-        out.push({ id: eId, type: "delta", text: texts.join("") });
+      const fullText = texts.join("");
+      if (fullText.length > 0 && eId) {
+        if (fullText.length > LARGE_CONTENT_THRESHOLD) {
+          out.push({
+            id: eId,
+            type: "delta",
+            text: makePreview(fullText),
+            isLarge: true,
+            fullText,
+          });
+        } else {
+          out.push({ id: eId, type: "delta", text: fullText });
+        }
       }
       continue;
     }

@@ -18,14 +18,28 @@ export type ChatMessage = {
   /** Anthropic 事件 id，用于去重；user 本地消息可无 */
   eventId?: string;
   role: Role;
+  /** 气泡里默认显示的文本（大消息=preview） */
   content: string;
+  /** 完整原文：仅当 isLarge=true 时填充，配合"查看完整内容"展开 */
+  fullContent?: string;
+  /** 大消息标记 */
+  isLarge?: boolean;
   /** ISO 时间戳 */
   createdAt: string;
 };
 
 /** 服务端轮询返回给客户端的"已转换"事件 */
 export type ServerEvent =
-  | { id: string; type: "delta"; text: string }
+  | {
+      id: string;
+      type: "delta";
+      /** 渲染到气泡的文本：小消息=原文；大消息=preview */
+      text: string;
+      /** 大消息标记：超过阈值时为 true */
+      isLarge?: boolean;
+      /** 大消息的完整原文，用于"查看完整内容"展开 */
+      fullText?: string;
+    }
   | { id: string; type: "status"; text: string };
 
 /** /api/chat 响应 */
