@@ -13,6 +13,7 @@ import {
   AgentConfig,
   CHAT_STORAGE_KEY,
   DEFAULT_AGENT,
+  SESSION_STORAGE_KEY,
   loadAgent,
 } from "@/lib/agent";
 
@@ -29,6 +30,7 @@ function uid() {
 export default function ChatPage() {
   const [agent, setAgent] = useState<AgentConfig>(DEFAULT_AGENT);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +45,8 @@ export default function ChatPage() {
         const parsed = JSON.parse(raw) as ChatMessage[];
         if (Array.isArray(parsed)) setMessages(parsed);
       }
+      const sid = window.localStorage.getItem(SESSION_STORAGE_KEY);
+      if (sid) setSessionId(sid);
     } catch {
       /* ignore */
     }
@@ -52,6 +56,15 @@ export default function ChatPage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
   }, [messages]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (sessionId) {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+    } else {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  }, [sessionId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -74,6 +87,10 @@ export default function ChatPage() {
   const send = useCallback(async () => {
     const trimmed = input.trim();
     if (!trimmed || sending) return;
+    if (!agent.agentId) {
+      setError("请先在管理页配置 Agent ID。");
+      return;
+    }
 
     const userMsg: ChatMessage = {
       id: uid(),
@@ -85,9 +102,7 @@ export default function ChatPage() {
       role: "assistant",
       content: "",
     };
-    const next = [...messages, userMsg, assistantMsg];
-
-    setMessages(next);
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
     setInput("");
     setSending(true);
     setError(null);
@@ -101,14 +116,9 @@ export default function ChatPage() {
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
-          system: agent.systemPrompt,
-          model: agent.model,
-          temperature: agent.temperature,
-          maxTokens: agent.maxTokens,
-          messages: [...messages, userMsg].map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
+          agentId: agent.agentId,
+          sessionId,
+          message: trimmed,
         }),
       });
 
@@ -133,7 +143,9 @@ export default function ChatPage() {
           const event = parseEvent(chunk);
           if (!event) continue;
 
-          if (event.type === "delta") {
+          if (event.type === "session") {
+            setSessionId(event.data.sessionId);
+          } else if (event.type === "delta") {
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantMsg.id
@@ -148,12 +160,12 @@ export default function ChatPage() {
       }
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
-      const message = err instanceof Error ? err.message : "对话失败";
-      setError(message);
+      const errMessage = err instanceof Error ? err.message : "对话失败";
+      setError(errMessage);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsg.id && m.content === ""
-            ? { ...m, content: `⚠️ ${message}` }
+            ? { ...m, content: `⚠️ ${errMessage}` }
             : m,
         ),
       );
@@ -161,44 +173,50 @@ export default function ChatPage() {
       setSending(false);
       abortRef.current = null;
     }
-  }, [agent, input, messages, sending]);
+  }, [agent, input, sending, sessionId]);
 
   const stop = () => {
     abortRef.current?.abort();
     setSending(false);
   };
 
-  const clear = () => {
+  const newConversation = () => {
     setMessages([]);
+    setSessionId(null);
     setError(null);
   };
 
   return (
     <div className="flex h-[calc(100vh-9rem)] flex-col gap-4">
       <section className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <div>
+        <div className="min-w-0">
           <h1 className="text-lg font-semibold">{agent.name}</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
+          <p className="truncate text-sm text-slate-500 dark:text-slate-400">
             {agent.description}
           </p>
-          <p className="mt-1 text-xs text-slate-400">
-            模型 {agent.model} · 温度 {agent.temperature} · max_tokens{" "}
-            {agent.maxTokens}
+          <p className="mt-1 truncate text-xs text-slate-400">
+            <span className="font-mono">{agent.agentId}</span>
+            {sessionId && (
+              <>
+                {" · "}
+                <span className="font-mono">{sessionId}</span>
+              </>
+            )}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-shrink-0 items-center gap-2">
           <button
             type="button"
-            onClick={clear}
+            onClick={newConversation}
             className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
           >
-            清空对话
+            新对话
           </button>
           <Link
             href="/manage"
             className="rounded-md bg-ocean-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-ocean-700"
           >
-            配置 Agent
+            配置
           </Link>
         </div>
       </section>
@@ -271,11 +289,13 @@ export default function ChatPage() {
   );
 }
 
-function parseEvent(chunk: string):
+type ParsedEvent =
+  | { type: "session"; data: { sessionId: string } }
   | { type: "delta"; data: { text: string } }
-  | { type: "done"; data: unknown }
-  | { type: "error"; data: { message: string } }
-  | null {
+  | { type: "done"; data: { stopReason?: string } }
+  | { type: "error"; data: { message: string } };
+
+function parseEvent(chunk: string): ParsedEvent | null {
   const lines = chunk.split("\n");
   let event = "";
   let data = "";
@@ -286,6 +306,7 @@ function parseEvent(chunk: string):
   if (!event) return null;
   try {
     const parsed = JSON.parse(data);
+    if (event === "session") return { type: "session", data: parsed };
     if (event === "delta") return { type: "delta", data: parsed };
     if (event === "done") return { type: "done", data: parsed };
     if (event === "error") return { type: "error", data: parsed };

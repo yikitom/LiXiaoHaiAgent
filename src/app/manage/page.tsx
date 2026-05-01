@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  AVAILABLE_MODELS,
   AgentConfig,
   DEFAULT_AGENT,
   loadAgent,
@@ -40,7 +39,9 @@ export default function ManagePage() {
         <div>
           <h1 className="text-xl font-semibold">Agent 管理</h1>
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            在这里调整李小海的人设、模型与对话参数。配置保存在浏览器中。
+            理小海是在 Anthropic Console 中定义的 Managed Agent，模型 / System
+            Prompt / 工具都在 Console 中维护。这里只配置前端显示信息和对应的 Agent
+            ID。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -73,99 +74,69 @@ export default function ManagePage() {
         </div>
       )}
 
-      <section className="grid gap-6 md:grid-cols-2">
-        <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-          <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-            身份
-          </h2>
-          <Field label="名称">
-            <input
-              className={inputClass}
-              value={cfg.name}
-              onChange={(e) => update("name", e.target.value)}
-            />
-          </Field>
-          <Field label="一句话描述">
-            <input
-              className={inputClass}
-              value={cfg.description}
-              onChange={(e) => update("description", e.target.value)}
-            />
-          </Field>
-          <Field label="开场白">
-            <textarea
-              className={`${inputClass} h-24 resize-none`}
-              value={cfg.greeting}
-              onChange={(e) => update("greeting", e.target.value)}
-            />
-          </Field>
-        </div>
-
-        <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-          <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-            模型与生成参数
-          </h2>
-          <Field label="模型">
-            <select
-              className={inputClass}
-              value={cfg.model}
-              onChange={(e) => update("model", e.target.value)}
-            >
-              {AVAILABLE_MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                  {m.note ? ` · ${m.note}` : ""}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field
-            label={`温度 (temperature) — ${cfg.temperature.toFixed(2)}`}
-            hint="0 更稳定，1 更发散"
-          >
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={cfg.temperature}
-              onChange={(e) => update("temperature", Number(e.target.value))}
-              className="w-full accent-ocean-600"
-            />
-          </Field>
-          <Field label="最大输出 tokens (max_tokens)">
-            <input
-              type="number"
-              min={64}
-              max={8192}
-              step={64}
-              className={inputClass}
-              value={cfg.maxTokens}
-              onChange={(e) =>
-                update("maxTokens", Math.max(64, Number(e.target.value) || 0))
-              }
-            />
-          </Field>
-        </div>
+      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+          Managed Agent
+        </h2>
+        <Field
+          label="Agent ID"
+          hint="Anthropic Console 中创建的 Managed Agent ID（agent_ 开头）。每次对话会用这个 ID 创建 Session。"
+        >
+          <input
+            className={`${inputClass} font-mono`}
+            value={cfg.agentId}
+            placeholder="agent_011CabNgA9MEKd3p63BmR566"
+            onChange={(e) => update("agentId", e.target.value.trim())}
+          />
+        </Field>
       </section>
 
-      <section className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-            系统提示词 (System Prompt)
-          </h2>
-          <span className="text-xs text-slate-400">
-            {cfg.systemPrompt.length} 字符
-          </span>
+      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+          显示信息
+        </h2>
+        <Field label="名称">
+          <input
+            className={inputClass}
+            value={cfg.name}
+            onChange={(e) => update("name", e.target.value)}
+          />
+        </Field>
+        <Field label="一句话描述">
+          <input
+            className={inputClass}
+            value={cfg.description}
+            onChange={(e) => update("description", e.target.value)}
+          />
+        </Field>
+        <Field label="开场白">
+          <textarea
+            className={`${inputClass} h-24 resize-none`}
+            value={cfg.greeting}
+            onChange={(e) => update("greeting", e.target.value)}
+          />
+        </Field>
+      </section>
+
+      <section className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs leading-6 text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300">
+        <div className="mb-1 font-semibold text-slate-700 dark:text-slate-200">
+          说明
         </div>
-        <p className="text-xs text-slate-500 dark:text-slate-400">
-          这段提示词会作为 system 字段传给 Claude，决定李小海的人格与行为约束。
-        </p>
-        <textarea
-          className={`${inputClass} min-h-[260px] font-mono text-[13px] leading-6`}
-          value={cfg.systemPrompt}
-          onChange={(e) => update("systemPrompt", e.target.value)}
-        />
+        <ul className="list-disc space-y-1 pl-4">
+          <li>
+            Managed Agent 的模型、System Prompt、Skills、MCP 工具等都在 Anthropic
+            Console 中配置；前端不再需要调这些参数。
+          </li>
+          <li>
+            服务端首次对话时会自动创建一个 Cloud Environment，并缓存在内存中；
+            生产环境建议在 <code className="font-mono">.env.local</code> 中显式
+            设置 <code className="font-mono">ANTHROPIC_ENVIRONMENT_ID</code>。
+          </li>
+          <li>
+            对话页的「新对话」按钮会清空当前 Session ID 与本地消息，下一条消息会创建新
+            Session。
+          </li>
+        </ul>
       </section>
     </div>
   );
@@ -189,9 +160,7 @@ function Field({
         {label}
       </span>
       {children}
-      {hint && (
-        <span className="block text-xs text-slate-400">{hint}</span>
-      )}
+      {hint && <span className="block text-xs text-slate-400">{hint}</span>}
     </label>
   );
 }

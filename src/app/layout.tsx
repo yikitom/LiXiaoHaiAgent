@@ -3,8 +3,8 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "李小海 Agent 控制台",
-  description: "管理并与李小海 Agent 对话",
+  title: "理小海 Agent 控制台",
+  description: "管理并与理小海 Managed Agent 对话",
 };
 
 export default function RootLayout({
@@ -23,9 +23,9 @@ export default function RootLayout({
                   海
                 </span>
                 <div className="leading-tight">
-                  <div className="text-sm font-semibold">李小海 Agent</div>
+                  <div className="text-sm font-semibold">理小海 Agent</div>
                   <div className="text-xs text-slate-500 dark:text-slate-400">
-                    Powered by Claude
+                    Managed Agent · Powered by Claude
                   </div>
                 </div>
               </Link>
@@ -49,7 +49,7 @@ export default function RootLayout({
             {children}
           </main>
           <footer className="border-t border-slate-200/70 py-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
-            李小海 Agent · 与 Claude 对话
+            理小海 Managed Agent · 与 Claude 对话
           </footer>
         </div>
       </body>
