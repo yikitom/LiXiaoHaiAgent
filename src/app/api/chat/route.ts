@@ -20,6 +20,16 @@ const INACTIVITY_TIMEOUT_MS = 300_000;
 
 let cachedEnvironmentId: string | null = null;
 
+function getVaultIds(): string[] | undefined {
+  const raw = process.env.ANTHROPIC_VAULT_IDS;
+  if (!raw) return undefined;
+  const ids = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return ids.length > 0 ? ids : undefined;
+}
+
 async function getEnvironmentId(client: Anthropic): Promise<string> {
   if (process.env.ANTHROPIC_ENVIRONMENT_ID) {
     return process.env.ANTHROPIC_ENVIRONMENT_ID;
@@ -223,9 +233,11 @@ export async function POST(req: NextRequest) {
         }
 
         try {
+          const vaultIds = getVaultIds();
           const session = await client.beta.sessions.create({
             agent: { type: "agent", id: agentId },
             environment_id: environmentId,
+            ...(vaultIds && { vault_ids: vaultIds }),
           });
           sessionId = session.id;
           send("session", { sessionId });
