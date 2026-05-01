@@ -1,0 +1,13 @@
+[build]
+  command = "pnpm build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  PNPM_VERSION = "10"
+  NEXT_TELEMETRY_DISABLED = "1"
+
+# Next.js 适配：自动把 App Router / API 路由 / 流式响应映射到 Netlify Functions + Edge。
+# Netlify 通常会自动识别 Next.js 项目并启用此插件，显式声明保证一致性。
+[[plugins]]
+  package = "@netlify/plugin-nextjs"

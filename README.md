@@ -22,6 +22,35 @@ cp .env.example .env.local
 pnpm dev    # http://localhost:3000
 ```
 
+## 部署到 Netlify
+
+仓库已包含 `netlify.toml` + `@netlify/plugin-nextjs`，连接 GitHub 后可一键部署。
+
+**一次性配置：**
+
+1. https://app.netlify.com/start → 选择 GitHub `yikitom/lixiaohaiagent`
+2. **Build command** 与 **Publish directory** 留默认（已由 `netlify.toml` 指定）
+3. 进入 *Site configuration → Environment variables*，添加：
+   - `ANTHROPIC_API_KEY` = `sk-ant-…`（必填）
+   - `ANTHROPIC_ENVIRONMENT_ID` = `env_…`（可选；不设则每次冷启会创建新 Cloud Environment）
+4. 点 *Deploy*
+
+之后：
+
+- `main` 分支 push → 自动生产部署
+- 其他分支 / PR → 自动 Deploy Preview，可独立测试
+
+**关于 SSE 流式的注意事项：**
+
+`/api/chat` 是 SSE 长连接。Netlify 默认 Function 同步超时为 10 秒（Pro 26 秒）；
+Next.js Runtime 会把流式路由路由到 Edge Functions 以支持长流。如生产环境
+出现 504，可在 Netlify Dashboard 上把该 Function 切到 Background / 升级套餐。
+
+## CI
+
+GitHub Actions（`.github/workflows/ci.yml`）会在每次 push 与 PR 上跑 `pnpm build`，
+失败会拦住合并；Netlify 在此之上独立构建并发布。
+
 ## 架构
 
 ```
