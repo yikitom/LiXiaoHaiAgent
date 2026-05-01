@@ -10,6 +10,8 @@ type ChatRequestBody = {
   message: string;
 };
 
+type Step = "environment" | "session" | "stream" | "send";
+
 let cachedEnvironmentId: string | null = null;
 
 async function getEnvironmentId(client: Anthropic): Promise<string> {
@@ -34,6 +36,29 @@ function sseError(status: number, message: string) {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function describeError(step: Step, err: unknown): string {
+  const stepLabel: Record<Step, string> = {
+    environment: "创建 Environment",
+    session: "创建 Session",
+    stream: "打开事件流",
+    send: "发送消息",
+  };
+
+  if (err && typeof err === "object" && "status" in err) {
+    const e = err as {
+      status?: number;
+      error?: { error?: { message?: string } };
+      message?: string;
+      request_id?: string;
+    };
+    const apiMsg = e.error?.error?.message ?? e.message ?? "未知错误";
+    const rid = e.request_id ? ` · request_id ${e.request_id}` : "";
+    return `${stepLabel[step]}失败 (HTTP ${e.status ?? "?"}): ${apiMsg}${rid}`;
+  }
+  if (err instanceof Error) return `${stepLabel[step]}失败：${err.message}`;
+  return `${stepLabel[step]}失败：未知错误`;
 }
 
 export async function POST(req: NextRequest) {
@@ -75,25 +100,48 @@ export async function POST(req: NextRequest) {
         controller.close();
       };
 
-      try {
-        let sessionId = existingSessionId;
+      const fail = (step: Step, err: unknown) => {
+        // 服务端日志保留完整错误，便于按 request_id 反查
+        console.error(`[/api/chat] step=${step}`, err);
+        send("error", { message: describeError(step, err) });
+        close();
+      };
 
-        if (!sessionId) {
-          const environmentId = await getEnvironmentId(client);
+      let sessionId = existingSessionId;
+
+      if (!sessionId) {
+        let environmentId: string;
+        try {
+          environmentId = await getEnvironmentId(client);
+        } catch (err) {
+          return fail("environment", err);
+        }
+
+        try {
           const session = await client.beta.sessions.create({
-            agent: agentId,
+            // 显式对象形式，比字符串简写在 SDK + API 双端都更稳。
+            agent: { type: "agent", id: agentId },
             environment_id: environmentId,
           });
           sessionId = session.id;
           send("session", { sessionId });
+        } catch (err) {
+          return fail("session", err);
         }
+      }
 
-        // Stream-first: open the SSE stream BEFORE sending the message,
-        // otherwise early events (status transitions, first agent.message)
-        // can land before our consumer is attached.
-        const eventStream = await client.beta.sessions.events.stream(sessionId);
+      // Stream-first：先开 SSE 再发消息，避免漏掉早期事件。
+      let eventStream: AsyncIterable<Record<string, unknown>>;
+      try {
+        eventStream = (await client.beta.sessions.events.stream(
+          sessionId!,
+        )) as unknown as AsyncIterable<Record<string, unknown>>;
+      } catch (err) {
+        return fail("stream", err);
+      }
 
-        await client.beta.sessions.events.send(sessionId, {
+      try {
+        await client.beta.sessions.events.send(sessionId!, {
           events: [
             {
               type: "user.message",
@@ -101,14 +149,17 @@ export async function POST(req: NextRequest) {
             },
           ],
         });
+      } catch (err) {
+        return fail("send", err);
+      }
 
-        for await (const event of eventStream as AsyncIterable<
-          Record<string, unknown>
-        >) {
+      try {
+        for await (const event of eventStream) {
           const type = event.type as string;
 
           if (type === "agent.message") {
-            const content = (event.content as Array<Record<string, unknown>>) ?? [];
+            const content =
+              (event.content as Array<Record<string, unknown>>) ?? [];
             for (const block of content) {
               if (block.type === "text" && typeof block.text === "string") {
                 send("delta", { text: block.text });
@@ -123,21 +174,18 @@ export async function POST(req: NextRequest) {
           }
 
           if (type === "session.status_idle") {
-            const stopReason = (event.stop_reason as { type?: string } | undefined)
-              ?.type;
+            const stopReason = (
+              event.stop_reason as { type?: string } | undefined
+            )?.type;
             if (stopReason && stopReason !== "requires_action") {
               send("done", { stopReason });
               break;
             }
           }
         }
-
         close();
       } catch (err) {
-        const errMsg =
-          err instanceof Error ? err.message : "调用 Anthropic API 失败。";
-        send("error", { message: errMsg });
-        close();
+        fail("stream", err);
       }
     },
   });
