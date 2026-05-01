@@ -57,21 +57,41 @@ function MessageBubble({ role, content, agentName, streaming }: Props) {
           </div>
         )}
         <div className="prose-chat whitespace-pre-wrap break-words">
-          {parts.map((p, i) =>
-            p.type === "code" ? (
-              <pre key={i}>
-                <code className={`language-${p.lang}`}>{p.value}</code>
-              </pre>
-            ) : (
-              <span key={i}>{p.value}</span>
-            ),
-          )}
-          {streaming && (
-            <span className="ml-0.5 inline-block h-3 w-1.5 translate-y-0.5 animate-pulse bg-current" />
+          {streaming && content === "" ? (
+            <TypingDots />
+          ) : (
+            <>
+              {parts.map((p, i) =>
+                p.type === "code" ? (
+                  <pre key={i}>
+                    <code className={`language-${p.lang}`}>{p.value}</code>
+                  </pre>
+                ) : (
+                  <span key={i}>{p.value}</span>
+                ),
+              )}
+              {streaming && (
+                <span className="ml-0.5 inline-block h-3 w-1.5 translate-y-0.5 animate-pulse bg-current" />
+              )}
+            </>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+function TypingDots() {
+  return (
+    <span
+      role="status"
+      aria-label="正在思考"
+      className="inline-flex items-center gap-1 py-1"
+    >
+      <span className="typing-dot inline-block h-1.5 w-1.5 rounded-full bg-slate-400" />
+      <span className="typing-dot typing-dot--2 inline-block h-1.5 w-1.5 rounded-full bg-slate-400" />
+      <span className="typing-dot typing-dot--3 inline-block h-1.5 w-1.5 rounded-full bg-slate-400" />
+    </span>
   );
 }
 

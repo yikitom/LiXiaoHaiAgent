@@ -107,10 +107,17 @@ export default function ChatPage() {
     setInput("");
     setSending(true);
     setError(null);
-    setStreamStatus(null);
+    setStreamStatus("正在连接…");
 
     const controller = new AbortController();
     abortRef.current = controller;
+
+    // 8 秒还无任何事件就升级提示，告诉用户在排队 / 等模型
+    const slowHint = window.setTimeout(() => {
+      setStreamStatus((prev) =>
+        prev === "正在连接…" ? "等待模型响应中（高峰期可能需要数秒）…" : prev,
+      );
+    }, 8000);
 
     try {
       const res = await fetch("/api/chat", {
@@ -196,6 +203,7 @@ export default function ChatPage() {
         ),
       );
     } finally {
+      window.clearTimeout(slowHint);
       setSending(false);
       setStreamStatus(null);
       abortRef.current = null;
