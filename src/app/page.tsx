@@ -30,6 +30,7 @@ type ClientEvent =
 type SendResponse = {
   sessionId: string;
   sentEventId: string | null;
+  sentCreatedAt: string | null;
   lastEventIdBeforeSend: string | null;
   vaultIds: string[] | null;
   error?: string;
@@ -38,7 +39,7 @@ type SendResponse = {
 
 type PollResponse = {
   events: ClientEvent[];
-  lastEventId: string | null;
+  lastCreatedAt: string | null;
   isDone: boolean;
   isError: boolean;
   errorMessage?: string | null;
@@ -202,7 +203,8 @@ export default function ChatPage() {
       }
 
       setSessionId(sendData.sessionId);
-      let cursor = sendData.lastEventIdBeforeSend; // null = 从头拉
+      // 用 user.message 的 created_at 做游标，此后只拉严格更晚的事件
+      let cursor: string | null = sendData.sentCreatedAt;
 
       // 2) 轮询 events.list 直到 isDone / isError
       const seenIds = new Set<string>();
@@ -216,7 +218,7 @@ export default function ChatPage() {
           signal: controller.signal,
           body: JSON.stringify({
             sessionId: sendData.sessionId,
-            afterEventId: cursor,
+            afterCreatedAt: cursor,
           }),
         });
         const pollData = (await pollResp.json()) as PollResponse;
@@ -248,7 +250,7 @@ export default function ChatPage() {
           }
         }
 
-        if (pollData.lastEventId) cursor = pollData.lastEventId;
+        if (pollData.lastCreatedAt) cursor = pollData.lastCreatedAt;
 
         if (pollData.isError) {
           if (pollData.invalidateSession) setSessionId(null);

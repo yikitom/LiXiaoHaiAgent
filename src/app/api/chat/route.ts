@@ -161,6 +161,7 @@ export async function POST(req: NextRequest) {
   }
 
   let sentEventId: string | null = null;
+  let sentCreatedAt: string | null = null;
   try {
     const resp = (await client.beta.sessions.events.send(sessionId!, {
       events: [
@@ -169,8 +170,9 @@ export async function POST(req: NextRequest) {
           content: [{ type: "text", text: message }],
         },
       ],
-    })) as { events?: Array<{ id?: string }> };
+    })) as { events?: Array<{ id?: string; created_at?: string }> };
     sentEventId = resp?.events?.[0]?.id ?? null;
+    sentCreatedAt = resp?.events?.[0]?.created_at ?? null;
   } catch (err) {
     const { message: m, status } = describeApiError(err);
     return jsonError(status, `发送消息失败：${m}`, {
@@ -182,7 +184,8 @@ export async function POST(req: NextRequest) {
   return Response.json({
     sessionId,
     sentEventId,
-    lastEventIdBeforeSend,
+    sentCreatedAt,
+    lastEventIdBeforeSend, // 兼容字段，目前 client 不再使用
     vaultIds: vaultIds ?? null,
   });
 }

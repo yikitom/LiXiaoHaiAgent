@@ -1,4 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
 import { isBadSessionError } from "../route";
 
@@ -7,7 +6,8 @@ export const dynamic = "force-dynamic";
 
 type PollRequestBody = {
   sessionId: string;
-  afterEventId?: string | null;
+  /** ISO 时间戳。后续轮询拉 created_at 严格大于此值的事件 */
+  afterCreatedAt?: string | null;
 };
 
 const NON_FATAL_ERRORS = new Set([
@@ -65,13 +65,17 @@ function jsonError(status: number, message: string) {
   return Response.json({ error: message }, { status });
 }
 
+const ANTHROPIC_BASE = process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com";
+
 /**
  * POST /api/chat/events
- * 客户端按 ~1.5s 一次轮询。每次调用 events.list 拉 cursor 之后的新事件，
- * 服务端把 agent.* 事件转换成前端可直接使用的 { type: "delta"|"status", text }。
+ * 客户端按 ~1.5s 一次轮询 Anthropic events.list 取增量事件。
  *
- * Request:  { sessionId, afterEventId? }
- * Response: { events: ClientEvent[], lastEventId, isDone, isError, errorMessage? }
+ * Cursor 用 created_at[gt]——这是 events.list 实际支持的语义；之前用
+ * after_id 会被 API 拒绝 (Unknown query parameter 'after_id')。
+ *
+ * 由于 SDK 类型签名对 created_at[gt] 这种 bracket key 支持不一致，
+ * 这里直接走 raw fetch 调 REST API，同时省掉一次 SDK 反序列化。
  */
 export async function POST(req: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -85,67 +89,80 @@ export async function POST(req: NextRequest) {
   }
   if (!body.sessionId) return jsonError(400, "缺少 sessionId。");
 
-  const client = new Anthropic({ apiKey });
+  const url = new URL(
+    `/v1/sessions/${encodeURIComponent(body.sessionId)}/events`,
+    ANTHROPIC_BASE,
+  );
+  url.searchParams.set("limit", "200");
+  if (body.afterCreatedAt) {
+    url.searchParams.set("created_at[gt]", body.afterCreatedAt);
+  }
 
-  // events.list 默认按时间倒序返回。我们要拿「自 cursor 之后的所有新事件」，
-  // 用 after_id 做 forward 游标拉取。
-  const listParams: Record<string, unknown> = { limit: 200 };
-  if (body.afterEventId) listParams.after_id = body.afterEventId;
-
-  let raw: Array<Record<string, unknown>>;
+  let httpResp: Response;
   try {
-    const resp = (await client.beta.sessions.events.list(
-      body.sessionId,
-      listParams as Parameters<
-        typeof client.beta.sessions.events.list
-      >[1],
-    )) as unknown as { data?: unknown };
-    const data = Array.isArray(resp.data) ? resp.data : [];
-    raw = data as Array<Record<string, unknown>>;
+    httpResp = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "managed-agents-2026-04-01",
+      },
+    });
   } catch (err) {
-    const e = err as {
-      status?: number;
-      error?: { error?: { message?: string } };
-      message?: string;
-    };
-    const apiMsg =
-      e.error?.error?.message ?? e.message ?? "events.list 调用失败";
-    // 200 响应携带 isError，避免客户端走「网络故障退避重试」路径。
-    // 同时带上 invalidateSession 让客户端清理坏 session 并自动重建。
     return Response.json({
       events: [],
-      lastEventId: body.afterEventId ?? null,
+      lastCreatedAt: body.afterCreatedAt ?? null,
       isDone: true,
       isError: true,
-      errorMessage: apiMsg,
-      invalidateSession: isBadSessionError(err),
+      errorMessage: `网络错误：${err instanceof Error ? err.message : "未知"}`,
+      invalidateSession: false,
     });
   }
 
-  // 部分 Anthropic 列表端点返回的是 newest-first，统一翻成时间正序
-  // 通过对 sevt_*** 这种自增 id 做字典序比较是不可靠的；这里假设 SDK
-  // 按 created_at 已排序——但保险起见反一次（如果 SDK 已经是正序，
-  // 客户端会按 lastEventId 过滤掉旧的，不会出错）。
-  const newest = raw[0];
-  const last = raw[raw.length - 1];
-  const ascending: Array<Record<string, unknown>> =
-    raw.length > 1 &&
-    typeof newest?.created_at === "string" &&
-    typeof last?.created_at === "string" &&
-    (newest.created_at as string) > (last.created_at as string)
-      ? [...raw].reverse()
-      : raw;
+  if (!httpResp.ok) {
+    const errBody = (await httpResp.json().catch(() => ({}))) as {
+      error?: { message?: string; type?: string };
+    };
+    const apiMsg =
+      errBody.error?.message ?? `events.list 调用失败 (HTTP ${httpResp.status})`;
+    const fakeErr = {
+      status: httpResp.status,
+      message: apiMsg,
+      error: { error: { message: apiMsg } },
+    };
+    return Response.json({
+      events: [],
+      lastCreatedAt: body.afterCreatedAt ?? null,
+      isDone: true,
+      isError: true,
+      errorMessage: apiMsg,
+      invalidateSession: isBadSessionError(fakeErr),
+    });
+  }
+
+  const result = (await httpResp.json()) as { data?: unknown };
+  const raw: Array<Record<string, unknown>> = Array.isArray(result.data)
+    ? (result.data as Array<Record<string, unknown>>)
+    : [];
+
+  // 按 created_at 升序，确保 delta 拼接顺序正确
+  const ascending = [...raw].sort((a, b) => {
+    const ta = (a.created_at as string) ?? "";
+    const tb = (b.created_at as string) ?? "";
+    return ta.localeCompare(tb);
+  });
 
   const out: ClientEvent[] = [];
   let isDone = false;
   let isError = false;
   let errorMessage: string | null = null;
-  let lastEventId: string | null = body.afterEventId ?? null;
+  let lastCreatedAt = body.afterCreatedAt ?? null;
 
   for (const event of ascending) {
     const eId = readString(event, "id");
     const type = readString(event, "type") ?? "";
-    if (eId) lastEventId = eId;
+    const ca = readString(event, "created_at");
+    if (ca) lastCreatedAt = ca;
 
     if (type === "agent.message") {
       const content = (event.content as Array<Record<string, unknown>>) ?? [];
@@ -203,8 +220,7 @@ export async function POST(req: NextRequest) {
       const { type: errType, message: errMsg } = extractSessionError(event);
       const friendly = friendlyErrorMessage(errType, errMsg);
       if (NON_FATAL_ERRORS.has(errType)) {
-        if (eId)
-          out.push({ id: eId, type: "status", text: `⚠️ ${friendly}` });
+        if (eId) out.push({ id: eId, type: "status", text: `⚠️ ${friendly}` });
         continue;
       }
       isError = true;
@@ -238,7 +254,7 @@ export async function POST(req: NextRequest) {
 
   return Response.json({
     events: out,
-    lastEventId,
+    lastCreatedAt,
     isDone,
     isError,
     errorMessage,
