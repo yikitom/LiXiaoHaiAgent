@@ -130,6 +130,8 @@ export default function ChatPage() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let invalidate = false;
+      let receivedAny = false;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -146,6 +148,13 @@ export default function ChatPage() {
           if (event.type === "session") {
             setSessionId(event.data.sessionId);
           } else if (event.type === "delta") {
+            // 极小概率上游 proxy 漏 HTML 错误页进 SSE 流；检测到就当作传输错误。
+            if (looksLikeHtml(event.data.text)) {
+              throw new Error(
+                "网络代理切断了 SSE 长连接（返回了 HTML 错误页），请稍后重试。",
+              );
+            }
+            receivedAny = true;
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantMsg.id
@@ -153,15 +162,27 @@ export default function ChatPage() {
                   : m,
               ),
             );
+          } else if (event.type === "done") {
+            if (event.data.invalidateSession) invalidate = true;
+            if (event.data.stopReason === "inactivity_timeout" && !receivedAny) {
+              throw new Error(
+                "Agent 在 90 秒内没有产出任何回复，已自动结束。常见原因：Session 状态异常（点「新对话」重试）或 Agent 工具未配置。",
+              );
+            }
           } else if (event.type === "error") {
+            if (event.data.invalidateSession) invalidate = true;
             throw new Error(event.data.message || "对话出错");
           }
         }
       }
+
+      if (invalidate) setSessionId(null);
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
       const errMessage = err instanceof Error ? err.message : "对话失败";
       setError(errMessage);
+      // 任何错误都假定 session 已不可用，下条消息会自动新建。
+      setSessionId(null);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsg.id && m.content === ""
@@ -292,14 +313,31 @@ export default function ChatPage() {
 type ParsedEvent =
   | { type: "session"; data: { sessionId: string } }
   | { type: "delta"; data: { text: string } }
-  | { type: "done"; data: { stopReason?: string } }
-  | { type: "error"; data: { message: string } };
+  | {
+      type: "done";
+      data: { stopReason?: string; invalidateSession?: boolean };
+    }
+  | {
+      type: "error";
+      data: { message: string; invalidateSession?: boolean };
+    };
+
+function looksLikeHtml(text: string): boolean {
+  const t = text.trimStart().toLowerCase();
+  return (
+    t.startsWith("<html") ||
+    t.startsWith("<!doctype") ||
+    t.startsWith("<head>") ||
+    t.startsWith("<body")
+  );
+}
 
 function parseEvent(chunk: string): ParsedEvent | null {
   const lines = chunk.split("\n");
   let event = "";
   let data = "";
   for (const line of lines) {
+    if (line.startsWith(":")) continue; // 心跳注释
     if (line.startsWith("event:")) event = line.slice(6).trim();
     else if (line.startsWith("data:")) data += line.slice(5).trim();
   }

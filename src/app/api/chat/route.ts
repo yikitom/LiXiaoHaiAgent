@@ -12,6 +12,9 @@ type ChatRequestBody = {
 
 type Step = "environment" | "session" | "stream" | "send";
 
+const HEARTBEAT_MS = 15_000;
+const INACTIVITY_TIMEOUT_MS = 90_000;
+
 let cachedEnvironmentId: string | null = null;
 
 async function getEnvironmentId(client: Anthropic): Promise<string> {
@@ -31,14 +34,17 @@ async function getEnvironmentId(client: Anthropic): Promise<string> {
   return env.id;
 }
 
-function sseError(status: number, message: string) {
+function jsonError(status: number, message: string) {
   return new Response(JSON.stringify({ error: message }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function describeError(step: Step, err: unknown): string {
+function describeError(step: Step, err: unknown): {
+  message: string;
+  status: number | null;
+} {
   const stepLabel: Record<Step, string> = {
     environment: "创建 Environment",
     session: "创建 Session",
@@ -55,16 +61,21 @@ function describeError(step: Step, err: unknown): string {
     };
     const apiMsg = e.error?.error?.message ?? e.message ?? "未知错误";
     const rid = e.request_id ? ` · request_id ${e.request_id}` : "";
-    return `${stepLabel[step]}失败 (HTTP ${e.status ?? "?"}): ${apiMsg}${rid}`;
+    return {
+      message: `${stepLabel[step]}失败 (HTTP ${e.status ?? "?"}): ${apiMsg}${rid}`,
+      status: e.status ?? null,
+    };
   }
-  if (err instanceof Error) return `${stepLabel[step]}失败：${err.message}`;
-  return `${stepLabel[step]}失败：未知错误`;
+  if (err instanceof Error) {
+    return { message: `${stepLabel[step]}失败：${err.message}`, status: null };
+  }
+  return { message: `${stepLabel[step]}失败：未知错误`, status: null };
 }
 
 export async function POST(req: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return sseError(
+    return jsonError(
       500,
       "缺少 ANTHROPIC_API_KEY 环境变量，请在服务器的 .env.local 中配置。",
     );
@@ -74,12 +85,12 @@ export async function POST(req: NextRequest) {
   try {
     body = (await req.json()) as ChatRequestBody;
   } catch {
-    return sseError(400, "请求体不是合法 JSON。");
+    return jsonError(400, "请求体不是合法 JSON。");
   }
 
   const { agentId, sessionId: existingSessionId, message } = body;
   if (!agentId || !message?.trim()) {
-    return sseError(400, "缺少 agentId 或 message。");
+    return jsonError(400, "缺少 agentId 或 message。");
   }
 
   const client = new Anthropic({ apiKey });
@@ -88,24 +99,64 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let closed = false;
-      const send = (event: string, data: unknown) => {
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
+      let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const enqueue = (chunk: string) => {
         if (closed) return;
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        );
+        try {
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          /* controller already closed */
+        }
       };
+
+      const send = (event: string, data: unknown) => {
+        enqueue(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+
+      // SSE 注释行（: 开头）作为心跳，保持中间 proxy 不会因 idle 切断长连接。
+      const heartbeatTick = () => enqueue(`: ping ${Date.now()}\n\n`);
+
       const close = () => {
         if (closed) return;
         closed = true;
-        controller.close();
+        if (heartbeat) clearInterval(heartbeat);
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        try {
+          controller.close();
+        } catch {
+          /* ignore */
+        }
       };
 
-      const fail = (step: Step, err: unknown) => {
-        // 服务端日志保留完整错误，便于按 request_id 反查
+      const fail = (
+        step: Step,
+        err: unknown,
+        opts?: { invalidateSession?: boolean },
+      ) => {
+        const { message: msg, status } = describeError(step, err);
         console.error(`[/api/chat] step=${step}`, err);
-        send("error", { message: describeError(step, err) });
+        send("error", {
+          message: msg,
+          // 让前端自行决定是否清掉 LocalStorage 里的 sessionId
+          invalidateSession:
+            opts?.invalidateSession ??
+            (status === 400 || status === 404 || step === "send"),
+        });
         close();
       };
+
+      const bumpInactivity = () => {
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => {
+          send("done", { stopReason: "inactivity_timeout" });
+          close();
+        }, INACTIVITY_TIMEOUT_MS);
+      };
+
+      heartbeat = setInterval(heartbeatTick, HEARTBEAT_MS);
+      bumpInactivity();
 
       let sessionId = existingSessionId;
 
@@ -119,7 +170,6 @@ export async function POST(req: NextRequest) {
 
         try {
           const session = await client.beta.sessions.create({
-            // 显式对象形式，比字符串简写在 SDK + API 双端都更稳。
             agent: { type: "agent", id: agentId },
             environment_id: environmentId,
           });
@@ -137,7 +187,7 @@ export async function POST(req: NextRequest) {
           sessionId!,
         )) as unknown as AsyncIterable<Record<string, unknown>>;
       } catch (err) {
-        return fail("stream", err);
+        return fail("stream", err, { invalidateSession: true });
       }
 
       try {
@@ -150,11 +200,13 @@ export async function POST(req: NextRequest) {
           ],
         });
       } catch (err) {
-        return fail("send", err);
+        return fail("send", err, { invalidateSession: true });
       }
 
       try {
         for await (const event of eventStream) {
+          if (closed) break;
+          bumpInactivity();
           const type = event.type as string;
 
           if (type === "agent.message") {
@@ -169,7 +221,7 @@ export async function POST(req: NextRequest) {
           }
 
           if (type === "session.status_terminated") {
-            send("done", { stopReason: "terminated" });
+            send("done", { stopReason: "terminated", invalidateSession: true });
             break;
           }
 
@@ -185,8 +237,12 @@ export async function POST(req: NextRequest) {
         }
         close();
       } catch (err) {
-        fail("stream", err);
+        fail("stream", err, { invalidateSession: true });
       }
+    },
+
+    cancel() {
+      // 客户端断开时清理；具体的 timer 已经在 close() 中处理。
     },
   });
 
@@ -195,6 +251,8 @@ export async function POST(req: NextRequest) {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      // 关键：阻止反向代理 / CDN 缓冲流式响应
+      "X-Accel-Buffering": "no",
     },
   });
 }
