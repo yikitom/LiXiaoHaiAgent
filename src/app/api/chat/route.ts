@@ -83,6 +83,51 @@ function readString(o: unknown, key: string): string | undefined {
   return undefined;
 }
 
+// Anthropic session.error 的 error 字段嵌套不固定，做防御读取
+function extractSessionError(event: Record<string, unknown>): {
+  type: string;
+  message: string;
+} {
+  const errorObj = event.error as Record<string, unknown> | undefined;
+  if (errorObj && typeof errorObj === "object") {
+    return {
+      type: readString(errorObj, "type") ?? "unknown",
+      message: readString(errorObj, "message") ?? "",
+    };
+  }
+  return {
+    type:
+      readString(event, "error_type") ?? readString(event, "code") ?? "unknown",
+    message: readString(event, "message") ?? "",
+  };
+}
+
+// 非致命错误：agent 会自动跳过该能力继续执行
+const NON_FATAL_ERRORS = new Set([
+  "mcp_authentication_failed_error",
+  "mcp_initialize_failed_error",
+  "mcp_connection_failed_error",
+]);
+
+function friendlyErrorMessage(type: string, message: string): string {
+  if (type === "mcp_authentication_failed_error") {
+    return "GitHub / 第三方 MCP 未授权（已跳过；如需启用请去 Console 配置对应 Vault 凭证）";
+  }
+  if (type === "mcp_initialize_failed_error") {
+    return "MCP Server 初始化失败（已跳过此能力）";
+  }
+  if (type === "model_rate_limited_error") {
+    return `Anthropic API 限流：${message || "请稍后重试"}。如频繁出现，请在 Console 检查工作区配额，或换用 Sonnet/Haiku。`;
+  }
+  if (type === "model_overloaded_error") {
+    return `Anthropic 模型当前过载：${message || "请稍后重试"}`;
+  }
+  if (type === "model_error") {
+    return `模型执行出错：${message || "未知"}。可重试或调整 prompt。`;
+  }
+  return `Session 错误 (${type})${message ? `：${message}` : ""}`;
+}
+
 export async function POST(req: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -288,6 +333,28 @@ export async function POST(req: NextRequest) {
 
           if (type === "agent.thread_context_compacted") {
             sendStatus("上下文压缩中…");
+            continue;
+          }
+
+          if (type === "session.error") {
+            const { type: errType, message: errMsg } =
+              extractSessionError(event);
+            const friendly = friendlyErrorMessage(errType, errMsg);
+            console.warn(`[/api/chat] session.error type=${errType}`, errMsg);
+
+            if (NON_FATAL_ERRORS.has(errType)) {
+              // agent 会自动绕开，不打断对话流
+              sendStatus(`⚠️ ${friendly}`);
+              continue;
+            }
+
+            send("error", { message: friendly, invalidateSession: false });
+            close();
+            break;
+          }
+
+          if (type === "session.status_rescheduled") {
+            sendStatus("已被自动重排队，稍候…");
             continue;
           }
 
