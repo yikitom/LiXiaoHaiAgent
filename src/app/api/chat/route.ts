@@ -62,6 +62,29 @@ function describeApiError(err: unknown): { message: string; status: number } {
   return { message: "未知错误", status: 500 };
 }
 
+// 判定一个 Anthropic 错误是否说明「这个 session 已经不可用了」——
+// 包括 archive / delete / not found / 状态冲突。前端拿到此标记后会
+// 清掉本地 sessionId 并自动用新 session 重试。
+export function isBadSessionError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as {
+    status?: number;
+    error?: { error?: { message?: string } };
+    message?: string;
+  };
+  const status = e.status;
+  const msg = (e.error?.error?.message ?? e.message ?? "").toLowerCase();
+  return (
+    status === 404 ||
+    status === 409 ||
+    msg.includes("archived") ||
+    msg.includes("not found") ||
+    msg.includes("deleted") ||
+    msg.includes("does not exist") ||
+    msg.includes("cannot send events")
+  );
+}
+
 /**
  * POST /api/chat
  * 短请求：创建（或复用）session，发送 user.message，立刻返回。
@@ -152,7 +175,7 @@ export async function POST(req: NextRequest) {
     const { message: m, status } = describeApiError(err);
     return jsonError(status, `发送消息失败：${m}`, {
       sessionId,
-      invalidateSession: status === 400 || status === 404,
+      invalidateSession: isBadSessionError(err),
     });
   }
 

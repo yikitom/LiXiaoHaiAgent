@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { NextRequest } from "next/server";
+import { isBadSessionError } from "../route";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -109,7 +110,16 @@ export async function POST(req: NextRequest) {
     };
     const apiMsg =
       e.error?.error?.message ?? e.message ?? "events.list 调用失败";
-    return jsonError(e.status ?? 500, apiMsg);
+    // 200 响应携带 isError，避免客户端走「网络故障退避重试」路径。
+    // 同时带上 invalidateSession 让客户端清理坏 session 并自动重建。
+    return Response.json({
+      events: [],
+      lastEventId: body.afterEventId ?? null,
+      isDone: true,
+      isError: true,
+      errorMessage: apiMsg,
+      invalidateSession: isBadSessionError(err),
+    });
   }
 
   // 部分 Anthropic 列表端点返回的是 newest-first，统一翻成时间正序

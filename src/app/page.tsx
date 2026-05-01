@@ -42,6 +42,7 @@ type PollResponse = {
   isDone: boolean;
   isError: boolean;
   errorMessage?: string | null;
+  invalidateSession?: boolean;
   error?: string;
 };
 
@@ -158,23 +159,46 @@ export default function ChatPage() {
       );
     }, 8000);
 
-    try {
-      // 1) 发送 user.message，立刻拿到 sessionId + cursor
-      const sendResp = await fetch("/api/chat", {
+    // 内部辅助：尝试一次发送；返回值携带 invalidateSession 用于上层判断重试
+    const trySend = async (
+      sid: string | null,
+    ): Promise<{ data: SendResponse; invalidate: boolean }> => {
+      const r = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
           agentId: agent.agentId,
-          sessionId,
+          sessionId: sid,
           message: trimmed,
         }),
       });
-      const sendData = (await sendResp.json()) as SendResponse;
+      const data = (await r.json()) as SendResponse;
+      if (!r.ok) {
+        const invalidate = !!data.detail?.invalidateSession;
+        const err = new Error(
+          data.error || `请求失败：${r.status}`,
+        ) as Error & { invalidate?: boolean };
+        err.invalidate = invalidate;
+        throw err;
+      }
+      return { data, invalidate: false };
+    };
 
-      if (!sendResp.ok) {
-        if (sendData.detail?.invalidateSession) setSessionId(null);
-        throw new Error(sendData.error || `请求失败：${sendResp.status}`);
+    try {
+      // 1) 发送 user.message。坏 session 自动用空 sessionId 重试一次。
+      let sendData: SendResponse;
+      try {
+        ({ data: sendData } = await trySend(sessionId));
+      } catch (err) {
+        const e = err as Error & { invalidate?: boolean };
+        if (e.invalidate && sessionId) {
+          setStreamStatus("会话已失效，自动重建中…");
+          setSessionId(null);
+          ({ data: sendData } = await trySend(null));
+        } else {
+          throw err;
+        }
       }
 
       setSessionId(sendData.sessionId);
@@ -227,6 +251,7 @@ export default function ChatPage() {
         if (pollData.lastEventId) cursor = pollData.lastEventId;
 
         if (pollData.isError) {
+          if (pollData.invalidateSession) setSessionId(null);
           throw new Error(pollData.errorMessage || "Session 出错");
         }
         if (pollData.isDone) {
