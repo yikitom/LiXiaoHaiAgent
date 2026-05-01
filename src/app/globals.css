@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    @apply bg-slate-950 text-slate-100;
+  }
+}
+
+.prose-chat p {
+  margin: 0 0 0.5rem 0;
+}
+
+.prose-chat p:last-child {
+  margin-bottom: 0;
+}
+
+.prose-chat code {
+  @apply rounded bg-slate-200/70 px-1 py-0.5 text-[0.85em] dark:bg-slate-800;
+}
+
+.prose-chat pre {
+  @apply my-2 overflow-x-auto rounded-lg bg-slate-900 p-3 text-slate-100;
+}
+
+.prose-chat pre code {
+  @apply bg-transparent p-0 text-inherit;
+}
