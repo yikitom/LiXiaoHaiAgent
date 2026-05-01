@@ -23,8 +23,48 @@ type ChatMessage = {
   content: string;
 };
 
+type ClientEvent =
+  | { id: string; type: "delta"; text: string }
+  | { id: string; type: "status"; text: string };
+
+type SendResponse = {
+  sessionId: string;
+  sentEventId: string | null;
+  lastEventIdBeforeSend: string | null;
+  vaultIds: string[] | null;
+  error?: string;
+  detail?: { invalidateSession?: boolean };
+};
+
+type PollResponse = {
+  events: ClientEvent[];
+  lastEventId: string | null;
+  isDone: boolean;
+  isError: boolean;
+  errorMessage?: string | null;
+  error?: string;
+};
+
+const POLL_INTERVAL_MS = 1500;
+const POLL_MAX_BACKOFF_MS = 8000;
+
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("aborted", "AbortError"));
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(new DOMException("aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
 }
 
 export default function ChatPage() {
@@ -112,7 +152,6 @@ export default function ChatPage() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // 8 秒还无任何事件就升级提示，告诉用户在排队 / 等模型
     const slowHint = window.setTimeout(() => {
       setStreamStatus((prev) =>
         prev === "正在连接…" ? "等待模型响应中（高峰期可能需要数秒）…" : prev,
@@ -120,7 +159,8 @@ export default function ChatPage() {
     }, 8000);
 
     try {
-      const res = await fetch("/api/chat", {
+      // 1) 发送 user.message，立刻拿到 sessionId + cursor
+      const sendResp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -130,71 +170,81 @@ export default function ChatPage() {
           message: trimmed,
         }),
       });
+      const sendData = (await sendResp.json()) as SendResponse;
 
-      if (!res.ok || !res.body) {
-        const text = await res.text();
-        throw new Error(text || `请求失败：${res.status}`);
+      if (!sendResp.ok) {
+        if (sendData.detail?.invalidateSession) setSessionId(null);
+        throw new Error(sendData.error || `请求失败：${sendResp.status}`);
       }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let invalidate = false;
+      setSessionId(sendData.sessionId);
+      let cursor = sendData.lastEventIdBeforeSend; // null = 从头拉
+
+      // 2) 轮询 events.list 直到 isDone / isError
+      const seenIds = new Set<string>();
       let receivedAny = false;
+      let backoff = POLL_INTERVAL_MS;
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+      while (!controller.signal.aborted) {
+        const pollResp = await fetch("/api/chat/events", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            sessionId: sendData.sessionId,
+            afterEventId: cursor,
+          }),
+        });
+        const pollData = (await pollResp.json()) as PollResponse;
 
-        let idx;
-        while ((idx = buffer.indexOf("\n\n")) !== -1) {
-          const chunk = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
-          const event = parseEvent(chunk);
-          if (!event) continue;
+        if (!pollResp.ok) {
+          // 网络/接口偶发故障：退避重试
+          backoff = Math.min(backoff * 1.5, POLL_MAX_BACKOFF_MS);
+          await sleep(backoff, controller.signal);
+          continue;
+        }
+        backoff = POLL_INTERVAL_MS;
 
-          if (event.type === "session") {
-            setSessionId(event.data.sessionId);
-          } else if (event.type === "status") {
-            setStreamStatus(event.data.text || null);
-          } else if (event.type === "delta") {
-            // 极小概率上游 proxy 漏 HTML 错误页进 SSE 流；检测到就当作传输错误。
-            if (looksLikeHtml(event.data.text)) {
-              throw new Error(
-                "网络代理切断了 SSE 长连接（返回了 HTML 错误页），请稍后重试。",
-              );
-            }
+        for (const e of pollData.events) {
+          if (seenIds.has(e.id)) continue;
+          seenIds.add(e.id);
+
+          if (e.type === "delta") {
             receivedAny = true;
-            setStreamStatus(null); // 真正文字到达，清掉进度行
+            setStreamStatus(null);
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantMsg.id
-                  ? { ...m, content: m.content + event.data.text }
+                  ? { ...m, content: m.content + e.text }
                   : m,
               ),
             );
-          } else if (event.type === "done") {
-            if (event.data.invalidateSession) invalidate = true;
-            if (event.data.stopReason === "inactivity_timeout" && !receivedAny) {
-              throw new Error(
-                "Agent 在 90 秒内没有产出任何回复，已自动结束。常见原因：Session 状态异常（点「新对话」重试）或 Agent 工具未配置。",
-              );
-            }
-          } else if (event.type === "error") {
-            if (event.data.invalidateSession) invalidate = true;
-            throw new Error(event.data.message || "对话出错");
+          } else if (e.type === "status") {
+            setStreamStatus(e.text);
           }
         }
-      }
 
-      if (invalidate) setSessionId(null);
+        if (pollData.lastEventId) cursor = pollData.lastEventId;
+
+        if (pollData.isError) {
+          throw new Error(pollData.errorMessage || "Session 出错");
+        }
+        if (pollData.isDone) {
+          if (!receivedAny) {
+            // agent 直接结束没产出内容（多见于 session 状态异常 / 工具配置问题）
+            throw new Error(
+              "Agent 直接结束未产出回复。点「新对话」重试，或检查 Console 里 Agent 配置 / MCP 凭证。",
+            );
+          }
+          break;
+        }
+
+        await sleep(POLL_INTERVAL_MS, controller.signal);
+      }
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
       const errMessage = err instanceof Error ? err.message : "对话失败";
       setError(errMessage);
-      // 任何错误都假定 session 已不可用，下条消息会自动新建。
-      setSessionId(null);
       setMessages((prev) =>
         prev.map((m) =>
           m.id === assistantMsg.id && m.content === ""
@@ -329,50 +379,4 @@ export default function ChatPage() {
       </form>
     </div>
   );
-}
-
-type ParsedEvent =
-  | { type: "session"; data: { sessionId: string } }
-  | { type: "status"; data: { text: string } }
-  | { type: "delta"; data: { text: string } }
-  | {
-      type: "done";
-      data: { stopReason?: string; invalidateSession?: boolean };
-    }
-  | {
-      type: "error";
-      data: { message: string; invalidateSession?: boolean };
-    };
-
-function looksLikeHtml(text: string): boolean {
-  const t = text.trimStart().toLowerCase();
-  return (
-    t.startsWith("<html") ||
-    t.startsWith("<!doctype") ||
-    t.startsWith("<head>") ||
-    t.startsWith("<body")
-  );
-}
-
-function parseEvent(chunk: string): ParsedEvent | null {
-  const lines = chunk.split("\n");
-  let event = "";
-  let data = "";
-  for (const line of lines) {
-    if (line.startsWith(":")) continue; // 心跳注释
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) data += line.slice(5).trim();
-  }
-  if (!event) return null;
-  try {
-    const parsed = JSON.parse(data);
-    if (event === "session") return { type: "session", data: parsed };
-    if (event === "status") return { type: "status", data: parsed };
-    if (event === "delta") return { type: "delta", data: parsed };
-    if (event === "done") return { type: "done", data: parsed };
-    if (event === "error") return { type: "error", data: parsed };
-  } catch {
-    return null;
-  }
-  return null;
 }
