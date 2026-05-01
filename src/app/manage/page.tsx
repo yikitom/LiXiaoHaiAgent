@@ -1,166 +1,222 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
-import {
-  AgentConfig,
-  DEFAULT_AGENT,
-  loadAgent,
-  saveAgent,
-} from "@/lib/agent";
+import { useEffect, useState } from "react";
+import { Card, CardHeader, PageHeader, Pill, Stat } from "@/components/ui/Card";
+import { ListGroup, ListRow } from "@/components/ui/ListGroup";
+import { loadAgent } from "@/lib/agent";
+import { loadSkills } from "@/lib/skills";
+import { loadWatchlist } from "@/lib/watchlist";
+import { loadMemory } from "@/lib/memory";
+import { loadReports } from "@/lib/reports";
+import { loadProfile } from "@/lib/profile";
 
-export default function ManagePage() {
-  const [cfg, setCfg] = useState<AgentConfig>(DEFAULT_AGENT);
-  const [saved, setSaved] = useState(false);
+export default function OverviewPage() {
+  const [data, setData] = useState({
+    agentName: "理小海",
+    agentId: "",
+    skills: 0,
+    pendingIter: 0,
+    watch: 0,
+    memory: 0,
+    profileName: "",
+    reports: [] as { id: string; title: string; generatedAt: string }[],
+    pendingSkills: [] as { id: string; name: string }[],
+  });
 
   useEffect(() => {
-    setCfg(loadAgent());
+    const agent = loadAgent();
+    const skills = loadSkills();
+    const watch = loadWatchlist();
+    const memory = loadMemory();
+    const reports = loadReports();
+    const profile = loadProfile();
+    setData({
+      agentName: agent.name,
+      agentId: agent.agentId,
+      skills: skills.filter((s) => s.installed).length,
+      pendingIter: skills.filter((s) => s.pendingIteration).length,
+      watch: watch.length,
+      memory: memory.length,
+      profileName: profile.fullName || "尚未填写姓名",
+      reports: reports.slice(0, 3).map((r) => ({
+        id: r.id,
+        title: r.title,
+        generatedAt: r.generatedAt,
+      })),
+      pendingSkills: skills
+        .filter((s) => s.pendingIteration)
+        .map((s) => ({ id: s.id, name: s.name })),
+    });
   }, []);
 
-  const update = <K extends keyof AgentConfig>(key: K, value: AgentConfig[K]) =>
-    setCfg((prev) => ({ ...prev, [key]: value }));
-
-  const onSave = () => {
-    saveAgent(cfg);
-    setSaved(true);
-    window.setTimeout(() => setSaved(false), 1800);
-  };
-
-  const onReset = () => {
-    if (confirm("恢复默认配置？已保存的内容将被覆盖。")) {
-      setCfg(DEFAULT_AGENT);
-      saveAgent(DEFAULT_AGENT);
-    }
-  };
-
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Agent 管理</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            理小海是在 Anthropic Console 中定义的 Managed Agent，模型 / System
-            Prompt / 工具都在 Console 中维护。这里只配置前端显示信息和对应的 Agent
-            ID。
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
+    <div>
+      <PageHeader
+        title="概览"
+        description={`${data.agentName} · 个人投资顾问 Agent · ${data.profileName}`}
+        trailing={
           <Link
             href="/"
-            className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+            className="inline-flex h-9 items-center rounded-lg bg-ios-blue px-4 text-[13px] font-medium text-white transition-colors hover:bg-ios-blueHover"
           >
-            返回对话
+            开始对话
           </Link>
-          <button
-            type="button"
-            onClick={onReset}
-            className="rounded-md border border-red-300 bg-white px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:bg-slate-900 dark:text-red-300 dark:hover:bg-red-950"
-          >
-            恢复默认
-          </button>
-          <button
-            type="button"
-            onClick={onSave}
-            className="rounded-md bg-ocean-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-ocean-700"
-          >
-            保存配置
-          </button>
-        </div>
-      </header>
+        }
+      />
 
-      {saved && (
-        <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200">
-          已保存。返回对话页即可生效。
-        </div>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <Stat label="已装 Skills" value={data.skills} hint="可在 Skills 页管理" />
+        <Stat
+          label="待迭代"
+          value={data.pendingIter}
+          hint={data.pendingIter > 0 ? "需要确认" : "无待办"}
+        />
+        <Stat label="自选标的" value={data.watch} hint="持续跟踪中" />
+        <Stat label="记忆条目" value={data.memory} hint="跨会话沉淀" />
+      </div>
+
+      {data.pendingSkills.length > 0 && (
+        <Card className="mt-6 border-2 border-ios-orange/40">
+          <CardHeader
+            title={
+              <span className="flex items-center gap-2">
+                Skill 迭代待确认
+                <Pill tone="orange">{data.pendingSkills.length}</Pill>
+              </span>
+            }
+            description="理小海发现部分 Skill 可升级，请逐项确认能力变化后再启用。"
+            trailing={
+              <Link
+                href="/manage/skills"
+                className="text-[13px] font-medium text-ios-blue hover:underline"
+              >
+                前往审核 →
+              </Link>
+            }
+          />
+          <ul className="space-y-2 text-[13px] text-slate-700 dark:text-slate-200">
+            {data.pendingSkills.map((s) => (
+              <li
+                key={s.id}
+                className="flex items-center justify-between rounded-lg bg-ios-orange/8 px-3 py-2"
+              >
+                <span>{s.name}</span>
+                <Pill tone="orange">待审核</Pill>
+              </li>
+            ))}
+          </ul>
+        </Card>
       )}
 
-      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-          Managed Agent
-        </h2>
-        <Field
-          label="Agent ID"
-          hint="Anthropic Console 中创建的 Managed Agent ID（agent_ 开头）。每次对话会用这个 ID 创建 Session。"
+      <div className="mt-6 grid gap-6 md:grid-cols-2">
+        <ListGroup
+          title="最近报告"
+          footer="可在「报告」页查看完整历史，或立即生成新报告。"
         >
-          <input
-            className={`${inputClass} font-mono`}
-            value={cfg.agentId}
-            placeholder="agent_011CabNgA9MEKd3p63BmR566"
-            onChange={(e) => update("agentId", e.target.value.trim())}
-          />
-        </Field>
-      </section>
+          {data.reports.length === 0 && (
+            <ListRow primary="尚无报告" secondary="去「报告」页生成首份报告" />
+          )}
+          {data.reports.map((r) => (
+            <ListRow
+              key={r.id}
+              primary={r.title}
+              secondary={new Date(r.generatedAt).toLocaleString("zh-CN")}
+              trailing="›"
+            />
+          ))}
+        </ListGroup>
 
-      <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-        <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-          显示信息
-        </h2>
-        <Field label="名称">
-          <input
-            className={inputClass}
-            value={cfg.name}
-            onChange={(e) => update("name", e.target.value)}
+        <ListGroup title="快速入口">
+          <ListRow
+            leading={<Glyph>★</Glyph>}
+            primary="新增自选标的"
+            secondary="持续跟踪，自动出价值分析与买点建议"
+            trailing={
+              <Link
+                href="/manage/watchlist"
+                className="text-[13px] text-ios-blue"
+              >
+                进入 →
+              </Link>
+            }
           />
-        </Field>
-        <Field label="一句话描述">
-          <input
-            className={inputClass}
-            value={cfg.description}
-            onChange={(e) => update("description", e.target.value)}
+          <ListRow
+            leading={<Glyph>◆</Glyph>}
+            primary="浏览 Skill 目录"
+            secondary="从 GitHub 拉取最佳实践 Skill"
+            trailing={
+              <Link
+                href="/manage/skills"
+                className="text-[13px] text-ios-blue"
+              >
+                进入 →
+              </Link>
+            }
           />
-        </Field>
-        <Field label="开场白">
-          <textarea
-            className={`${inputClass} h-24 resize-none`}
-            value={cfg.greeting}
-            onChange={(e) => update("greeting", e.target.value)}
+          <ListRow
+            leading={<Glyph>◈</Glyph>}
+            primary="审核风控边界"
+            secondary="单标的上限 / 最大回撤 / 黑名单"
+            trailing={
+              <Link href="/manage/risk" className="text-[13px] text-ios-blue">
+                进入 →
+              </Link>
+            }
           />
-        </Field>
-      </section>
+          <ListRow
+            leading={<Glyph>◫</Glyph>}
+            primary="查看 / 整理记忆"
+            secondary="查看跨会话沉淀的偏好与研究"
+            trailing={
+              <Link
+                href="/manage/memory"
+                className="text-[13px] text-ios-blue"
+              >
+                进入 →
+              </Link>
+            }
+          />
+        </ListGroup>
+      </div>
 
-      <section className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs leading-6 text-slate-600 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-300">
-        <div className="mb-1 font-semibold text-slate-700 dark:text-slate-200">
-          说明
-        </div>
-        <ul className="list-disc space-y-1 pl-4">
-          <li>
-            Managed Agent 的模型、System Prompt、Skills、MCP 工具等都在 Anthropic
-            Console 中配置；前端不再需要调这些参数。
-          </li>
-          <li>
-            服务端首次对话时会自动创建一个 Cloud Environment，并缓存在内存中；
-            生产环境建议在 <code className="font-mono">.env.local</code> 中显式
-            设置 <code className="font-mono">ANTHROPIC_ENVIRONMENT_ID</code>。
-          </li>
-          <li>
-            对话页的「新对话」按钮会清空当前 Session ID 与本地消息，下一条消息会创建新
-            Session。
-          </li>
-        </ul>
-      </section>
+      <Card className="mt-6">
+        <CardHeader
+          title="Agent 状态"
+          description="当前后端连接信息（仅在浏览器与服务端可见）。"
+        />
+        <dl className="grid gap-3 text-[13px] sm:grid-cols-2">
+          <Row label="Agent ID" value={<span className="font-mono">{data.agentId}</span>} />
+          <Row label="模型 / System Prompt" value="由 Anthropic Console 配置" />
+          <Row label="Memory" value="跨会话持久化（Anthropic Memory Stores）" />
+          <Row label="对话状态" value="单一 Session，多轮上下文复用" />
+        </dl>
+      </Card>
     </div>
   );
 }
 
-const inputClass =
-  "w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-ocean-500 focus:ring-1 focus:ring-ocean-500 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100";
+function Glyph({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="flex h-7 w-7 items-center justify-center rounded-md bg-ios-blue/10 text-[13px] text-ios-blue">
+      {children}
+    </span>
+  );
+}
 
-function Field({
+function Row({
   label,
-  hint,
-  children,
+  value,
 }: {
   label: string;
-  hint?: string;
-  children: React.ReactNode;
+  value: React.ReactNode;
 }) {
   return (
-    <label className="block space-y-1.5">
-      <span className="text-xs font-medium text-slate-600 dark:text-slate-300">
-        {label}
-      </span>
-      {children}
-      {hint && <span className="block text-xs text-slate-400">{hint}</span>}
-    </label>
+    <div className="flex items-center justify-between gap-3 border-b border-slate-200/60 py-2 last:border-b-0 dark:border-slate-800/60">
+      <dt className="text-slate-500 dark:text-slate-400">{label}</dt>
+      <dd className="truncate text-right text-slate-900 dark:text-slate-100">
+        {value}
+      </dd>
+    </div>
   );
 }

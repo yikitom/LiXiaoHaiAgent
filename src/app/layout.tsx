@@ -3,7 +3,7 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "理小海 Agent 控制台",
+  title: "理小海 · 个人投资顾问",
   description: "管理并与理小海 Managed Agent 对话",
 };
 
@@ -16,41 +16,38 @@ export default function RootLayout({
     <html lang="zh-CN">
       <body>
         <div className="flex min-h-screen flex-col">
-          <header className="border-b border-slate-200/70 bg-white/80 backdrop-blur dark:border-slate-800 dark:bg-slate-950/70">
-            <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 py-3">
-              <Link href="/" className="flex items-center gap-2">
-                <span className="flex h-8 w-8 items-center justify-center rounded-full bg-ocean-600 text-base font-semibold text-white">
+          <header className="sticky top-0 z-40 border-b border-slate-200/60 bg-white/70 backdrop-blur-xl dark:border-slate-800/60 dark:bg-slate-950/60">
+            <div className="mx-auto flex h-[60px] w-full max-w-6xl items-center justify-between px-4">
+              <Link href="/" className="flex items-center gap-2.5">
+                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-ios-blue to-ios-indigo text-[15px] font-semibold text-white shadow-sm">
                   海
                 </span>
                 <div className="leading-tight">
-                  <div className="text-sm font-semibold">理小海 Agent</div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400">
-                    Managed Agent · Powered by Claude
+                  <div className="text-[15px] font-semibold text-slate-900 dark:text-slate-50">
+                    理小海
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    个人投资顾问 Agent
                   </div>
                 </div>
               </Link>
-              <nav className="flex items-center gap-1 text-sm">
+              <nav className="flex items-center gap-1 text-[13px] font-medium">
                 <Link
                   href="/"
-                  className="rounded-md px-3 py-1.5 text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+                  className="rounded-lg px-3.5 py-1.5 text-slate-700 transition-colors hover:bg-slate-200/60 dark:text-slate-200 dark:hover:bg-slate-800/60"
                 >
                   对话
                 </Link>
                 <Link
                   href="/manage"
-                  className="rounded-md px-3 py-1.5 text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+                  className="rounded-lg px-3.5 py-1.5 text-slate-700 transition-colors hover:bg-slate-200/60 dark:text-slate-200 dark:hover:bg-slate-800/60"
                 >
                   管理
                 </Link>
               </nav>
             </div>
           </header>
-          <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6">
-            {children}
-          </main>
-          <footer className="border-t border-slate-200/70 py-4 text-center text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
-            理小海 Managed Agent · 与 Claude 对话
-          </footer>
+          <main className="flex-1">{children}</main>
         </div>
       </body>
     </html>
