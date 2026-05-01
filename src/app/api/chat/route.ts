@@ -4,11 +4,63 @@ import { NextRequest } from "next/server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const ANTHROPIC_BASE =
+  process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com";
+
 type SendRequestBody = {
   agentId: string;
   sessionId?: string;
   message: string;
 };
+
+/**
+ * 在 events.send 之前，查一次 events.list 拿当前 session 最大 created_at。
+ * 这个时间戳就是「用户消息发送之前的最新事件」，用作客户端轮询的初始游标。
+ *
+ * 不依赖 events.send 响应里的 created_at —— 该字段在 SDK 不同版本里结构
+ * 不一致，可能为 undefined，会让 cursor 退化为 null 把所有历史事件再灌一遍。
+ */
+async function fetchSessionCursor(
+  sessionId: string,
+  apiKey: string,
+): Promise<string | null> {
+  try {
+    const url = new URL(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/events`,
+      ANTHROPIC_BASE,
+    );
+    url.searchParams.set("limit", "50");
+
+    const r = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "managed-agents-2026-04-01",
+      },
+    });
+    if (!r.ok) {
+      console.warn("[/api/chat] fetchSessionCursor HTTP", r.status);
+      return null;
+    }
+    const j = (await r.json()) as {
+      data?: Array<{ created_at?: string }>;
+    };
+    const data = j.data ?? [];
+    if (data.length === 0) return null;
+
+    // 不假设排序方向，取所有事件 created_at 的最大值
+    let max: string | null = null;
+    for (const e of data) {
+      const ca = e.created_at;
+      if (ca && (!max || ca > max)) max = ca;
+    }
+    return max;
+  } catch (err) {
+    console.warn("[/api/chat] fetchSessionCursor error", err);
+    return null;
+  }
+}
 
 let cachedEnvironmentId: string | null = null;
 
@@ -116,7 +168,7 @@ export async function POST(req: NextRequest) {
   const client = new Anthropic({ apiKey });
 
   let sessionId = existingSessionId;
-  let lastEventIdBeforeSend: string | null = null;
+  let cursorCreatedAt: string | null = null;
   const vaultIds = getVaultIds();
 
   if (!sessionId) {
@@ -141,23 +193,18 @@ export async function POST(req: NextRequest) {
         ...(vaultIds && { vault_ids: vaultIds }),
       });
       sessionId = session.id;
+      // 新建 session 没有任何历史事件，cursor 保持 null，下游轮询不带过滤
     } catch (err) {
       const { message: m, status } = describeApiError(err);
       return jsonError(status, `创建 Session 失败：${m}`);
     }
   } else {
-    // 已有 session：取最新事件 id，让客户端从这里之后开始轮询，
-    // 避免把历史事件再灌一遍
-    try {
-      const list = await client.beta.sessions.events.list(sessionId, {
-        limit: 1,
-      });
-      const data = (list as { data?: Array<{ id?: string }> }).data ?? [];
-      if (data[0]?.id) lastEventIdBeforeSend = data[0].id;
-    } catch (err) {
-      // 拿不到历史最大 id 不致命，客户端按 null cursor 兜底
-      console.warn("[/api/chat] events.list pre-send failed", err);
-    }
+    // 已有 session：先 events.list 拿当前最大 created_at 作为初始游标
+    cursorCreatedAt = await fetchSessionCursor(sessionId, apiKey);
+    console.log(
+      "[/api/chat] reuse session, pre-send cursor",
+      cursorCreatedAt,
+    );
   }
 
   let sentEventId: string | null = null;
@@ -185,7 +232,9 @@ export async function POST(req: NextRequest) {
     sessionId,
     sentEventId,
     sentCreatedAt,
-    lastEventIdBeforeSend, // 兼容字段，目前 client 不再使用
+    // 客户端用这个做初始轮询游标。新 session 时是 null（拉所有事件），
+    // 已有 session 时是「发送之前的最大 created_at」（只拉之后的新事件）
+    cursorCreatedAt,
     vaultIds: vaultIds ?? null,
   });
 }

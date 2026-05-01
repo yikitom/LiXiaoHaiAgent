@@ -31,7 +31,7 @@ type SendResponse = {
   sessionId: string;
   sentEventId: string | null;
   sentCreatedAt: string | null;
-  lastEventIdBeforeSend: string | null;
+  cursorCreatedAt: string | null;
   vaultIds: string[] | null;
   error?: string;
   detail?: { invalidateSession?: boolean };
@@ -203,8 +203,10 @@ export default function ChatPage() {
       }
 
       setSessionId(sendData.sessionId);
-      // 用 user.message 的 created_at 做游标，此后只拉严格更晚的事件
-      let cursor: string | null = sendData.sentCreatedAt;
+      // 服务端在 send 之前查 events.list 给出的最大 created_at；
+      // 复用 session 时它是「发消息前最后一个事件」，新 session 时是 null
+      // (拉所有事件，包括 agent 对刚发出消息的回复)
+      let cursor: string | null = sendData.cursorCreatedAt;
 
       // 2) 轮询 events.list 直到 isDone / isError
       const seenIds = new Set<string>();
