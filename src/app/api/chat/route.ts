@@ -234,6 +234,12 @@ export async function POST(req: NextRequest) {
 
         try {
           const vaultIds = getVaultIds();
+          console.log("[/api/chat] sessions.create", {
+            agentId,
+            environmentId,
+            vaultIds:
+              vaultIds ?? "(env ANTHROPIC_VAULT_IDS not set — MCP will fail)",
+          });
           const session = await client.beta.sessions.create({
             agent: { type: "agent", id: agentId },
             environment_id: environmentId,
