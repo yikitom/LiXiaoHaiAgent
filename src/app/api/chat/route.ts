@@ -12,8 +12,11 @@ type ChatRequestBody = {
 
 type Step = "environment" | "session" | "stream" | "send";
 
-const HEARTBEAT_MS = 15_000;
-const INACTIVITY_TIMEOUT_MS = 90_000;
+// 紧密心跳应对企业代理 (Squid 类常见 30s idle 切断)
+const HEARTBEAT_MS = 5_000;
+// Anthropic 端长工具调用 (Write 大文件 / Web Search 多次) 可达 2~3 分钟
+// 不出事件，留 5 分钟兜底
+const INACTIVITY_TIMEOUT_MS = 300_000;
 
 let cachedEnvironmentId: string | null = null;
 
@@ -72,6 +75,14 @@ function describeError(step: Step, err: unknown): {
   return { message: `${stepLabel[step]}失败：未知错误`, status: null };
 }
 
+function readString(o: unknown, key: string): string | undefined {
+  if (o && typeof o === "object" && key in o) {
+    const v = (o as Record<string, unknown>)[key];
+    return typeof v === "string" ? v : undefined;
+  }
+  return undefined;
+}
+
 export async function POST(req: NextRequest) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -111,11 +122,10 @@ export async function POST(req: NextRequest) {
         }
       };
 
-      const send = (event: string, data: unknown) => {
+      const send = (event: string, data: unknown) =>
         enqueue(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-      };
 
-      // SSE 注释行（: 开头）作为心跳，保持中间 proxy 不会因 idle 切断长连接。
+      // SSE 注释行作为心跳，保持中间 proxy 不切断 idle 长连接
       const heartbeatTick = () => enqueue(`: ping ${Date.now()}\n\n`);
 
       const close = () => {
@@ -139,7 +149,6 @@ export async function POST(req: NextRequest) {
         console.error(`[/api/chat] step=${step}`, err);
         send("error", {
           message: msg,
-          // 让前端自行决定是否清掉 LocalStorage 里的 sessionId
           invalidateSession:
             opts?.invalidateSession ??
             (status === 400 || status === 404 || step === "send"),
@@ -180,7 +189,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Stream-first：先开 SSE 再发消息，避免漏掉早期事件。
+      // Stream-first：先开 SSE，再发消息，避免漏掉早期事件
       let eventStream: AsyncIterable<Record<string, unknown>>;
       try {
         eventStream = (await client.beta.sessions.events.stream(
@@ -190,33 +199,95 @@ export async function POST(req: NextRequest) {
         return fail("stream", err, { invalidateSession: true });
       }
 
+      // 发送 user.message 并捕获其 event id：后续靠它判断「轮到我们处理了」
+      const ourEventIds = new Set<string>();
       try {
-        await client.beta.sessions.events.send(sessionId!, {
+        const sendResp = (await client.beta.sessions.events.send(sessionId!, {
           events: [
             {
               type: "user.message",
               content: [{ type: "text", text: message }],
             },
           ],
-        });
+        })) as { events?: Array<{ id?: string }> };
+        for (const e of sendResp?.events ?? []) {
+          if (e?.id) ourEventIds.add(e.id);
+        }
       } catch (err) {
         return fail("send", err, { invalidateSession: true });
       }
+
+      // 在拾取我们消息之前的事件全部跳过——可能是上一轮残留
+      let ourTurnStarted = ourEventIds.size === 0; // 没拿到 id 就退化为旧行为
+      let lastStatus = "";
+
+      const sendStatus = (text: string) => {
+        if (text === lastStatus) return;
+        lastStatus = text;
+        send("status", { text });
+      };
 
       try {
         for await (const event of eventStream) {
           if (closed) break;
           bumpInactivity();
-          const type = event.type as string;
+
+          const eId = readString(event, "id");
+          const type = readString(event, "type") ?? "";
+          const processedAt = readString(event, "processed_at");
+
+          // 我们发的 user.message 被 agent 拾取的那一刻
+          if (eId && ourEventIds.has(eId) && processedAt) {
+            ourTurnStarted = true;
+            sendStatus("已收到，开始处理…");
+            continue;
+          }
+          if (!ourTurnStarted) continue;
 
           if (type === "agent.message") {
             const content =
               (event.content as Array<Record<string, unknown>>) ?? [];
             for (const block of content) {
               if (block.type === "text" && typeof block.text === "string") {
+                lastStatus = ""; // 真正文字到了就清掉 status
                 send("delta", { text: block.text });
               }
             }
+            continue;
+          }
+
+          if (type === "agent.thinking") {
+            sendStatus("思考中…");
+            continue;
+          }
+
+          if (type === "agent.tool_use") {
+            const tool = readString(event, "tool_name") ?? "工具";
+            sendStatus(`调用 ${tool}…`);
+            continue;
+          }
+
+          if (type === "agent.tool_result") {
+            sendStatus("工具完成");
+            continue;
+          }
+
+          if (type === "agent.mcp_tool_use") {
+            const server = readString(event, "mcp_server_name") ?? "";
+            const tool = readString(event, "tool_name") ?? "";
+            sendStatus(
+              `MCP${server ? ` · ${server}` : ""}${tool ? ` · ${tool}` : ""}…`,
+            );
+            continue;
+          }
+
+          if (type === "agent.mcp_tool_result") {
+            sendStatus("MCP 完成");
+            continue;
+          }
+
+          if (type === "agent.thread_context_compacted") {
+            sendStatus("上下文压缩中…");
             continue;
           }
 
@@ -226,9 +297,10 @@ export async function POST(req: NextRequest) {
           }
 
           if (type === "session.status_idle") {
-            const stopReason = (
-              event.stop_reason as { type?: string } | undefined
-            )?.type;
+            const stopReason = readString(
+              event.stop_reason as Record<string, unknown> | undefined,
+              "type",
+            );
             if (stopReason && stopReason !== "requires_action") {
               send("done", { stopReason });
               break;
@@ -242,7 +314,7 @@ export async function POST(req: NextRequest) {
     },
 
     cancel() {
-      // 客户端断开时清理；具体的 timer 已经在 close() 中处理。
+      // close() 已通过定时器钩处理；空实现保留接口
     },
   });
 
@@ -251,7 +323,6 @@ export async function POST(req: NextRequest) {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      // 关键：阻止反向代理 / CDN 缓冲流式响应
       "X-Accel-Buffering": "no",
     },
   });

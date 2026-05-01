@@ -34,6 +34,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [streamStatus, setStreamStatus] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -106,6 +107,7 @@ export default function ChatPage() {
     setInput("");
     setSending(true);
     setError(null);
+    setStreamStatus(null);
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -147,6 +149,8 @@ export default function ChatPage() {
 
           if (event.type === "session") {
             setSessionId(event.data.sessionId);
+          } else if (event.type === "status") {
+            setStreamStatus(event.data.text || null);
           } else if (event.type === "delta") {
             // 极小概率上游 proxy 漏 HTML 错误页进 SSE 流；检测到就当作传输错误。
             if (looksLikeHtml(event.data.text)) {
@@ -155,6 +159,7 @@ export default function ChatPage() {
               );
             }
             receivedAny = true;
+            setStreamStatus(null); // 真正文字到达，清掉进度行
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantMsg.id
@@ -192,6 +197,7 @@ export default function ChatPage() {
       );
     } finally {
       setSending(false);
+      setStreamStatus(null);
       abortRef.current = null;
     }
   }, [agent, input, sending, sessionId]);
@@ -205,6 +211,7 @@ export default function ChatPage() {
     setMessages([]);
     setSessionId(null);
     setError(null);
+    setStreamStatus(null);
   };
 
   return (
@@ -259,6 +266,12 @@ export default function ChatPage() {
             }
           />
         ))}
+        {sending && streamStatus && (
+          <div className="flex items-center gap-2 pl-11 text-[12px] text-slate-500 dark:text-slate-400">
+            <span className="flex h-1.5 w-1.5 animate-pulse rounded-full bg-ios-blue" />
+            <span>{streamStatus}</span>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -312,6 +325,7 @@ export default function ChatPage() {
 
 type ParsedEvent =
   | { type: "session"; data: { sessionId: string } }
+  | { type: "status"; data: { text: string } }
   | { type: "delta"; data: { text: string } }
   | {
       type: "done";
@@ -345,6 +359,7 @@ function parseEvent(chunk: string): ParsedEvent | null {
   try {
     const parsed = JSON.parse(data);
     if (event === "session") return { type: "session", data: parsed };
+    if (event === "status") return { type: "status", data: parsed };
     if (event === "delta") return { type: "delta", data: parsed };
     if (event === "done") return { type: "done", data: parsed };
     if (event === "error") return { type: "error", data: parsed };
